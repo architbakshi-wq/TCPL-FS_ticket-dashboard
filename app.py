@@ -76,8 +76,29 @@ if uploaded_file:
     st.dataframe(filtered_df)
 
     # Download
-    excel_data = filtered_df.to_excel(index=False)
-    st.download_button("Download Filtered Data", data=excel_data, file_name="filtered_tickets.xlsx")
+
+from io import BytesIO
+
+# --- prepare download as an Excel file ---
+def to_excel_bytes(df):
+    output = BytesIO()
+    # use pandas ExcelWriter to write into the BytesIO object
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Filtered")
+        writer.save()
+    processed_data = output.getvalue()
+    return processed_data
+
+# Use the function when you want to provide download
+if not filtered_df.empty:
+    excel_bytes = to_excel_bytes(filtered_df)
+    st.download_button(
+        label="Download Filtered Data",
+        data=excel_bytes,
+        file_name="filtered_tickets.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
 
 else:
     st.warning("Please upload an Excel file to view the dashboard.")
