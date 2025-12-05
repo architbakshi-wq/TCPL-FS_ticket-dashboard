@@ -1,4 +1,3 @@
-# app.py - corrected minimal Streamlit dashboard
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -9,22 +8,27 @@ st.set_page_config(page_title="TCPL Ticket Dashboard", layout="wide")
 st.title("📊 TCPL Ticket Management Dashboard")
 st.write("Upload the latest Excel file to refresh the ticket dashboard.")
 
-# File uploader
-uploaded_file = st.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"])
+# --- File upload / default file -------------------------------------------
+uploaded_file = st.file_uploader("Upload Excel File (.xlsx)", type=["xlsx"]) 
 
-# If no upload, try to use data.xlsx in repo (optional)
+# If no upload, try to use data.xlsx placed in the repository (optional)
 DEFAULT_DATAFILE = "data.xlsx"
 if uploaded_file is None and os.path.exists(DEFAULT_DATAFILE):
     uploaded_file = DEFAULT_DATAFILE
 
-# If still no file, show message and stop further execution
+# If still no file, show friendly message and stop
 if not uploaded_file:
-    st.warning("No data file found. Please either:\n\n"
-               "• Upload the Excel file using the 'Upload Excel File' control, or\n"
-               "• Add a file named 'data.xlsx' into the repository so the app can use it by default.")
+    st.warning(
+        "No data file found. Please either:
+
+"
+        "• Upload the Excel file using the 'Upload Excel File' control, or
+"
+        "• Add a file named 'data.xlsx' into the repository so the app can use it by default."
+    )
     st.stop()
 
-# Read the file (uploaded_file is either a file-like object or a path)
+# --- Read the spreadsheet -------------------------------------------------
 try:
     df = pd.read_excel(uploaded_file)
 except Exception as e:
@@ -37,21 +41,39 @@ if 'Created Time' in df.columns:
 if 'Closed Time' in df.columns:
     df['Closed Time'] = pd.to_datetime(df['Closed Time'], errors='coerce')
 
-# Basic filters in sidebar
+# --- Sidebar filters -----------------------------------------------------
 st.sidebar.header("Filters")
 priority_filter = st.sidebar.multiselect("Select Priority", options=df.get('Priority', pd.Series()).dropna().unique())
 ticket_type_filter = st.sidebar.multiselect("Select Ticket Type", options=df.get('TicketType', pd.Series()).dropna().unique())
 sla_filter = st.sidebar.multiselect("SLA Status", options=df.get('Resolution Status', pd.Series()).dropna().unique())
 
-# Date range filter (if present)
+# --- Robust date-range input ---------------------------------------------
+start_date = None
+end_date = None
 if 'Created Time' in df.columns:
     min_date = df['Created Time'].min().date()
     max_date = df['Created Time'].max().date()
-    date_range = st.sidebar.date_input("Created Date Range", [min_date, max_date])
-else:
-    date_range = None
+    # Provide a date_input that returns either a single date or a list of two dates
+    date_input_value = st.sidebar.date_input("Choose a date range", [min_date, max_date])
 
-# Apply filters to create filtered_df (always define it)
+    # Normalize date_input_value to start_date and end_date
+    if isinstance(date_input_value, (list, tuple)):
+        if len(date_input_value) == 2:
+            start_date, end_date = date_input_value
+n        elif len(date_input_value) == 1:
+            # single selection returned as list with one element
+            start_date = end_date = date_input_value[0]
+    else:
+        # single date returned
+        start_date = end_date = date_input_value
+
+# convert to pandas timestamps if set
+if start_date is not None:
+    start_date = pd.to_datetime(start_date)
+if end_date is not None:
+    end_date = pd.to_datetime(end_date)
+
+# --- Apply filters and produce filtered_df --------------------------------
 filtered_df = df.copy()
 if priority_filter:
     filtered_df = filtered_df[filtered_df['Priority'].isin(priority_filter)]
@@ -59,45 +81,60 @@ if ticket_type_filter:
     filtered_df = filtered_df[filtered_df['TicketType'].isin(ticket_type_filter)]
 if sla_filter:
     filtered_df = filtered_df[filtered_df['Resolution Status'].isin(sla_filter)]
-if date_range and 'Created Time' in filtered_df.columns:
-    start_date, end_date = date_range
-    filtered_df = filtered_df[(filtered_df['Created Time'] >= pd.to_datetime(start_date)) & (filtered_df['Created Time'] <= pd.to_datetime(end_date))]
 
-# KPIs
+if start_date is not None and 'Created Time' in filtered_df.columns:
+    if end_date is None:
+        end_date = start_date
+    # include full day for end_date
+    filtered_df = filtered_df[(filtered_df['Created Time'] >= start_date) & (filtered_df['Created Time'] <= end_date)]
+
+# --- KPIs ----------------------------------------------------------------
 total_tickets = len(filtered_df)
-within_sla = len(filtered_df[filtered_df.get('Resolution Status') == "Within SLA"]) if 'Resolution Status' in filtered_df.columns else 0
+within_sla = 0
+if 'Resolution Status' in filtered_df.columns:
+    within_sla = filtered_df['Resolution Status'].str.contains('Within', case=False, na=False).sum()
 sla_percentage = (within_sla / total_tickets * 100) if total_tickets > 0 else 0
 
-col1, col2, col3 = st.columns(3)
+col1, col2, col3, col4 = st.columns([1.5,1,1,1])
 col1.metric("Total Tickets", total_tickets)
 col2.metric("Within SLA", f"{sla_percentage:.1f}%")
-col3.metric("Bug Tickets", len(filtered_df[filtered_df.get("TicketType") == "Bug"]) if 'TicketType' in filtered_df.columns else 0)
+col3.metric("Avg Resolution (hrs)", round(((filtered_df['Closed Time'] - filtered_df['Created Time']).dt.total_seconds()/3600).mean(),2) if ('Closed Time' in filtered_df.columns and 'Created Time' in filtered_df.columns and not filtered_df.empty) else '—')
+col4.metric("P4 Tickets", int(filtered_df[filtered_df.get('Priority') == 'P4'].shape[0]) if 'Priority' in filtered_df.columns else 0)
 
-# Simple charts
+st.markdown("---")
+
+# --- Charts ---------------------------------------------------------------
 if 'Priority' in filtered_df.columns and not filtered_df.empty:
-    fig1 = px.bar(filtered_df.groupby('Priority').size().reset_index(name='Count'), x="Priority", y="Count", title="Tickets by Priority")
-    st.plotly_chart(fig1, use_container_width=True)
+    prio_counts = filtered_df['Priority'].value_counts().reset_index()
+    prio_counts.columns = ['Priority','Count']
+    fig_prio = px.bar(prio_counts, x='Priority', y='Count', title='Tickets by Priority', text='Count')
+    st.plotly_chart(fig_prio, use_container_width=True)
 
 if 'TicketType' in filtered_df.columns and not filtered_df.empty:
-    fig2 = px.pie(filtered_df, names="TicketType", title="Ticket Distribution by Type")
-    st.plotly_chart(fig2, use_container_width=True)
+    fig_type = px.pie(filtered_df, names='TicketType', title='Ticket Type Distribution')
+    st.plotly_chart(fig_type, use_container_width=True)
 
-# Table
-st.subheader("📄 Filtered Data")
-st.dataframe(filtered_df, height=400)
+if 'Created Time' in filtered_df.columns and not filtered_df.empty:
+    trend = filtered_df.groupby(filtered_df['Created Time'].dt.date).size().reset_index(name='Count')
+    trend.columns = ['Date','Count']
+    fig_trend = px.line(trend, x='Date', y='Count', title='Tickets Over Time', markers=True)
+    st.plotly_chart(fig_trend, use_container_width=True)
 
-# Prepare Excel download correctly (BytesIO)
+st.markdown("---")
+
+# --- Data table ----------------------------------------------------------
+st.subheader("Filtered Tickets")
+st.dataframe(filtered_df.sort_values(by='Created Time', ascending=False).reset_index(drop=True), height=420)
+
+# --- Excel download (BytesIO) --------------------------------------------
 def to_excel_bytes(df_to_export):
     output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_to_export.to_excel(writer, index=False, sheet_name="Filtered")
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df_to_export.to_excel(writer, index=False, sheet_name='Filtered')
     return output.getvalue()
 
 if not filtered_df.empty:
     excel_bytes = to_excel_bytes(filtered_df)
-    st.download_button(
-        label="Download Filtered Data",
-        data=excel_bytes,
-        file_name="filtered_tickets.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    st.download_button(label='Download filtered data as Excel', data=excel_bytes, file_name='filtered_tickets.xlsx', mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+st.caption("Built with Streamlit — Upload your Excel file to refresh the dashboard. For persistent uploads, consider saving files to a secure storage (S3/GitHub) or implementing authenticated upload." )
